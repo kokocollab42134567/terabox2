@@ -507,13 +507,10 @@ const DOWNLOADS_DIR = path.join(__dirname, 'downloads');
 if (!fs.existsSync(DOWNLOADS_DIR)) fs.mkdirSync(DOWNLOADS_DIR);
 
 app.get('/stream', async (req, res) => {
-    const { filename } = req.query;
-    if (!filename) {
-        return res.status(400).json({ success: false, message: "Missing 'filename' query parameter." });
+    const { share } = req.query;
+    if (!share) {
+        return res.status(400).json({ success: false, message: "Missing 'share' query parameter." });
     }
-
-    const resolutions = ['M3U8_AUTO_360', 'M3U8_AUTO_480', 'M3U8_AUTO_720', 'M3U8_AUTO_1080'];
-    const downloadedFiles = {};
 
     const browser = await puppeteer.launch({
         headless: 'new',
@@ -521,67 +518,57 @@ app.get('/stream', async (req, res) => {
     });
 
     try {
-        for (const resolution of resolutions) {
-            const page = await browser.newPage();
+        const page = await browser.newPage();
 
-            // Load cookies
-            if (fs.existsSync(COOKIES_PATH)) {
-                const cookies = JSON.parse(fs.readFileSync(COOKIES_PATH, 'utf8'));
-                await page.setCookie(...cookies);
-            }
-
-            // Enable download behavior
-            const client = await page.target().createCDPSession();
-            await client.send('Page.setDownloadBehavior', {
-                behavior: 'allow',
-                downloadPath: DOWNLOADS_DIR
-            });
-
-            const streamURL = `https://www.1024tera.com/api/streaming?path=${encodeURIComponent('/' + filename)}&app_id=250528&clienttype=0&type=${resolution}&vip=0`;
-            console.log(`🌐 Opening ${resolution} link...`);
-
-            await page.goto(streamURL, { waitUntil: 'domcontentloaded', timeout: 60000 });
-
-            const responseBody = await page.evaluate(() => document.body.innerText);
-            const json = JSON.parse(responseBody);
-
-            if (json && json.url) {
-                console.log(`📥 Triggering download for ${resolution}...`);
-
-                const downloadPage = await browser.newPage();
-                const downloadClient = await downloadPage.target().createCDPSession();
-                await downloadClient.send('Page.setDownloadBehavior', {
-                    behavior: 'allow',
-                    downloadPath: DOWNLOADS_DIR
-                });
-
-                await downloadPage.goto(json.url, { waitUntil: 'networkidle2' });
-                await new Promise(resolve => setTimeout(resolve, 3000)); // wait 3 sec to ensure download starts
-                downloadedFiles[resolution] = json.url;
-
-                await downloadPage.close();
-            } else {
-                console.warn(`⚠️ No URL found for ${resolution}`);
-            }
-
-            await page.close();
+        // Load login cookies
+        if (fs.existsSync(COOKIES_PATH)) {
+            const cookies = JSON.parse(fs.readFileSync(COOKIES_PATH, 'utf8'));
+            await page.setCookie(...cookies);
         }
 
+        console.log("🌐 Navigating to share link...");
+        await page.goto(share, { waitUntil: 'domcontentloaded', timeout: 60000 });
+
+        let capturedUrl = null;
+
+        // Listen for network requests and find the first .m3u8 URL
+        page.on('request', request => {
+            const url = request.url();
+            if (!capturedUrl && url.includes('.m3u8')) {
+                capturedUrl = url;
+                console.log("🎯 Captured M3U8 URL:", capturedUrl);
+            }
+        });
+
+        // Wait to give time for request to fire
+        await page.waitForTimeout(15000);
+
+        if (!capturedUrl) {
+            await browser.close();
+            return res.status(404).json({ success: false, message: "No M3U8 file found in network activity." });
+        }
+
+        // Open new tab to trigger download
+        const m3u8Page = await browser.newPage();
+        await m3u8Page.goto(capturedUrl, { waitUntil: 'networkidle2', timeout: 60000 });
+
+        // Save the M3U8 file content manually
+        const m3u8Data = await m3u8Page.evaluate(() => document.body.innerText);
+        const savePath = path.join(__dirname, `${Date.now()}-captured.m3u8`);
+        fs.writeFileSync(savePath, m3u8Data);
+
+        console.log(`✅ M3U8 saved: ${savePath}`);
         await browser.close();
 
-        // Find all recently downloaded .m3u8 files
-        const allFiles = fs.readdirSync(DOWNLOADS_DIR)
-            .filter(file => file.endsWith('.m3u8'))
-            .map(file => path.join(DOWNLOADS_DIR, file));
+        res.json({ success: true, path: savePath });
 
-        res.json({ success: true, files: allFiles, urls: downloadedFiles });
-
-    } catch (error) {
-        console.error("❌ Streaming error:", error);
+    } catch (err) {
         await browser.close();
-        res.status(500).json({ success: false, message: "Streaming process failed." });
+        console.error("❌ Streaming error:", err);
+        res.status(500).json({ success: false, message: "Error while capturing M3U8 link." });
     }
 });
+
 
 
 
