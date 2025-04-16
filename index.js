@@ -521,10 +521,8 @@ app.get('/stream', async (req, res) => {
     });
 
     try {
-        const context = await browser.createIncognitoBrowserContext();
-
         for (const resolution of resolutions) {
-            const page = await context.newPage();
+            const page = await browser.newPage();
 
             // Load cookies
             if (fs.existsSync(COOKIES_PATH)) {
@@ -532,7 +530,7 @@ app.get('/stream', async (req, res) => {
                 await page.setCookie(...cookies);
             }
 
-            // Enable downloads to the specified folder
+            // Enable download behavior
             const client = await page.target().createCDPSession();
             await client.send('Page.setDownloadBehavior', {
                 behavior: 'allow',
@@ -546,21 +544,24 @@ app.get('/stream', async (req, res) => {
 
             const responseBody = await page.evaluate(() => document.body.innerText);
             const json = JSON.parse(responseBody);
+
             if (json && json.url) {
-                // Open new tab to trigger the .m3u8 download
-                const downloadPage = await context.newPage();
-                await downloadPage._client().send('Page.setDownloadBehavior', {
+                console.log(`📥 Triggering download for ${resolution}...`);
+
+                const downloadPage = await browser.newPage();
+                const downloadClient = await downloadPage.target().createCDPSession();
+                await downloadClient.send('Page.setDownloadBehavior', {
                     behavior: 'allow',
                     downloadPath: DOWNLOADS_DIR
                 });
 
-                console.log(`📥 Triggering download for ${resolution}...`);
                 await downloadPage.goto(json.url, { waitUntil: 'networkidle2' });
-
+                await new Promise(resolve => setTimeout(resolve, 3000)); // wait 3 sec to ensure download starts
                 downloadedFiles[resolution] = json.url;
+
                 await downloadPage.close();
             } else {
-                console.warn(`⚠️ No URL for ${resolution}`);
+                console.warn(`⚠️ No URL found for ${resolution}`);
             }
 
             await page.close();
@@ -568,11 +569,12 @@ app.get('/stream', async (req, res) => {
 
         await browser.close();
 
-        // Return paths of all .m3u8 files in the downloads directory
-        const allFiles = fs.readdirSync(DOWNLOADS_DIR).filter(file => file.endsWith('.m3u8'));
-        const responsePaths = allFiles.map(f => path.join(DOWNLOADS_DIR, f));
+        // Find all recently downloaded .m3u8 files
+        const allFiles = fs.readdirSync(DOWNLOADS_DIR)
+            .filter(file => file.endsWith('.m3u8'))
+            .map(file => path.join(DOWNLOADS_DIR, file));
 
-        res.json({ success: true, files: responsePaths, urls: downloadedFiles });
+        res.json({ success: true, files: allFiles, urls: downloadedFiles });
 
     } catch (error) {
         console.error("❌ Streaming error:", error);
@@ -580,6 +582,7 @@ app.get('/stream', async (req, res) => {
         res.status(500).json({ success: false, message: "Streaming process failed." });
     }
 });
+
 
 
 
