@@ -163,23 +163,16 @@ async function uploadToTeraBox(filePath, fileName) {
             console.log(`🔄 Attempt ${attempt + 1}/${MAX_RETRIES} for file: ${fileName} (Request ID: ${requestId})`);
 
             browser = await puppeteer.launch({
-                headless: "new",
+                headless: 'new',
                 protocolTimeout: 180000,
                 executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
                 args: [
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-dev-shm-usage',
-                    '--disable-gpu',
-                    '--disable-features=IsolateOrigins,site-per-process',
-                    '--disable-web-security',
-                    '--disable-http2',
-                    '--proxy-server="direct://"',
-                    '--proxy-bypass-list=*',
-                    '--disable-background-timer-throttling',
-                    '--disable-backgrounding-occluded-windows',
-                    '--disable-renderer-backgrounding',
-                    '--disable-accelerated-2d-canvas',
+                    '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
+                    '--disable-gpu', '--disable-features=IsolateOrigins,site-per-process',
+                    '--disable-web-security', '--disable-http2',
+                    '--proxy-server="direct://"', '--proxy-bypass-list=*',
+                    '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows',
+                    '--disable-renderer-backgrounding', '--disable-accelerated-2d-canvas',
                     '--disable-ipc-flooding-protection',
                     '--enable-features=NetworkService,NetworkServiceInProcess',
                 ],
@@ -189,11 +182,8 @@ async function uploadToTeraBox(filePath, fileName) {
 
             uploadPage = await browser.newPage();
             await uploadPage.setViewport({ width: 1280, height: 800 });
-            await uploadPage.setUserAgent(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
-            );
+            await uploadPage.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64)...");
 
-            // Load cookies
             if (fs.existsSync(COOKIES_PATH)) {
                 const cookies = JSON.parse(fs.readFileSync(COOKIES_PATH, 'utf8'));
                 await uploadPage.setCookie(...cookies);
@@ -201,91 +191,110 @@ async function uploadToTeraBox(filePath, fileName) {
 
             console.log("🌍 Navigating to TeraBox...");
             await uploadPage.goto('https://www.terabox.com/main?category=all', { waitUntil: 'load', timeout: 60000 });
-            console.log("✅ Page loaded successfully.");
 
             const fileInputSelector = 'input#h5Input0';
+            const firstRowSelector = 'tbody tr:first-child';
             await uploadPage.waitForSelector(fileInputSelector, { visible: true, timeout: 20000 });
 
-            // Get initial row count
-            const getRowCount = async () => {
-                return await uploadPage.evaluate(() => {
-                    return document.querySelectorAll('tbody tr').length;
-                });
-            };
+            let initialRowId = await uploadPage.evaluate((selector) => {
+                const row = document.querySelector(selector);
+                return row ? row.getAttribute('data-id') : null;
+            }, firstRowSelector);
 
-            const initialRowCount = await getRowCount();
-            console.log("📊 Initial row count:", initialRowCount);
-
-            // Upload the file
+            console.log(`📤 Uploading file: ${fileName}`);
             const inputUploadHandle = await uploadPage.$(fileInputSelector);
             await inputUploadHandle.uploadFile(filePath);
-            console.log(`📤 File selected for upload: ${filePath}`);
 
+            // Track upload progress
             const successSelector = '.status-success.file-list';
             const progressSelector = '.status-uploading.file-list .progress-now.progress-common';
 
-            // Monitor progress
-            console.log("⏳ Checking for upload status...");
-            const isUploaded = await uploadPage.evaluate((selector) => {
-                return !!document.querySelector(selector);
-            }, successSelector);
+            await new Promise(async (resolve) => {
+                let lastProgress = "";
+                const checkProgress = async () => {
+                    try {
+                        const progress = await uploadPage.evaluate((selector) => {
+                            const el = document.querySelector(selector);
+                            return el ? el.style.width : null;
+                        }, progressSelector);
 
-            if (isUploaded) {
-                console.log("✅ Upload completed instantly.");
-            } else {
-                console.log("⏳ Upload in progress, tracking dynamically...");
-                await new Promise(async (resolve) => {
-                    let lastProgress = "";
+                        if (progress && progress !== lastProgress) {
+                            console.log(`📊 Upload Progress: ${progress}`);
+                            lastProgress = progress;
+                        }
 
-                    const checkProgress = async () => {
-                        try {
-                            const progress = await uploadPage.evaluate((selector) => {
-                                const el = document.querySelector(selector);
-                                return el ? el.style.width : null;
-                            }, progressSelector);
+                        const isUploaded = await uploadPage.evaluate((selector) => {
+                            return !!document.querySelector(selector);
+                        }, successSelector);
 
-                            if (progress && progress !== lastProgress) {
-                                console.log(`📊 Upload Progress: ${progress}`);
-                                lastProgress = progress;
-                            }
-
-                            const done = await uploadPage.evaluate((selector) => {
-                                return !!document.querySelector(selector);
-                            }, successSelector);
-
-                            if (done || progress === "100%") {
-                                console.log("✅ Upload completed!");
-                                resolve();
-                            } else {
-                                setTimeout(checkProgress, 1000);
-                            }
-                        } catch (e) {
-                            console.log("⚠️ Error tracking progress, retrying...");
+                        if (isUploaded || progress === "100%") {
+                            console.log("✅ Upload completed!");
+                            resolve();
+                        } else {
                             setTimeout(checkProgress, 1000);
                         }
-                    };
+                    } catch {
+                        setTimeout(checkProgress, 1000);
+                    }
+                };
+                checkProgress();
+            });
 
-                    checkProgress();
-                });
+            // Wait for row to update
+            console.log("⏳ Waiting for file list update...");
+            await uploadPage.waitForFunction(
+                (selector, oldId) => {
+                    const row = document.querySelector(selector);
+                    return row && row.getAttribute('data-id') !== oldId;
+                },
+                { timeout: 600000 },
+                firstRowSelector,
+                initialRowId
+            );
+
+            let uploadedRowId = await uploadPage.evaluate((selector) => {
+                const row = document.querySelector(selector);
+                return row ? row.getAttribute('data-id') : null;
+            }, firstRowSelector);
+
+            console.log("🔄 Reloading file list...");
+            await uploadPage.reload({ waitUntil: 'domcontentloaded' });
+            await uploadPage.waitForSelector(firstRowSelector, { visible: true });
+
+            // Try to generate share link once
+            let shareLink = null;
+            try {
+                console.log("🔗 Attempting to generate share link...");
+                const checkboxSelector = `tbody tr[data-id="${uploadedRowId}"] .wp-s-pan-table__body-row--checkbox-block.is-select`;
+                await uploadPage.waitForSelector(checkboxSelector, { visible: true, timeout: 10000 });
+                await uploadPage.click(checkboxSelector);
+
+                const shareButtonSelector = '[title="Share"]';
+                await uploadPage.waitForSelector(shareButtonSelector, { visible: true, timeout: 10000 });
+                await uploadPage.click(shareButtonSelector);
+
+                const copyButtonSelector = '.private-share-btn';
+                await uploadPage.waitForSelector(copyButtonSelector, { visible: true, timeout: 10000 });
+                await uploadPage.click(copyButtonSelector);
+
+                const linkSelector = '.copy-link-content p.text';
+                await uploadPage.waitForSelector(linkSelector, { visible: true, timeout: 10000 });
+                shareLink = await uploadPage.$eval(linkSelector, el => el.textContent.trim());
+
+                console.log(`✅ Share Link: ${shareLink}`);
+            } catch (err) {
+                console.log("⚠️ Failed to generate share link. Skipping...");
+                console.log(`📄 Uploaded file name: ${fileName}`);
             }
-
-            // Wait until upload success row disappears (fully saved)
-console.log("⏳ Waiting for upload confirmation to disappear (file saved)...");
-await uploadPage.waitForFunction(() => {
-    return document.querySelectorAll('.status-success.file-list').length === 0;
-}, { timeout: 600000 });
-
-console.log("✅ Upload fully saved to TeraBox.");
-
 
             await uploadPage.close();
             await browser.close();
-            console.log("❎ Closed the browser.");
-
             fs.unlinkSync(filePath);
             console.log(`🗑️ Deleted temporary file: ${filePath}`);
 
-            return { success: true, filename: fileName };
+            return shareLink
+                ? { success: true, link: shareLink }
+                : { success: true, file: fileName };
 
         } catch (error) {
             console.error(`❌ Upload error on attempt ${attempt + 1}:`, error);
@@ -298,7 +307,6 @@ console.log("✅ Upload fully saved to TeraBox.");
 
     return { success: false, error: "Upload failed after multiple attempts." };
 }
-
 
 app.post('/upload', (req, res) => {
     let receivedBytes = 0;
