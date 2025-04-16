@@ -269,17 +269,14 @@ async function uploadToTeraBox(filePath, fileName) {
                 });
             }
 
-            // Wait for new row to appear
-            console.log("⏳ Waiting for file list to refresh...");
-            await uploadPage.waitForFunction(
-                (initial) => {
-                    return document.querySelectorAll('tbody tr').length > initial;
-                },
-                { timeout: 600000 },
-                initialRowCount
-            );
+            // Wait until upload success row disappears (fully saved)
+console.log("⏳ Waiting for upload confirmation to disappear (file saved)...");
+await uploadPage.waitForFunction(() => {
+    return document.querySelectorAll('.status-success.file-list').length === 0;
+}, { timeout: 600000 });
 
-            console.log("✅ File list refreshed with new file.");
+console.log("✅ Upload fully saved to TeraBox.");
+
 
             await uploadPage.close();
             await browser.close();
