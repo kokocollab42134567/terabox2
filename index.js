@@ -517,58 +517,66 @@ app.get('/stream', async (req, res) => {
         args: ['--no-sandbox', '--disable-setuid-sandbox']
     });
 
+    let capturedApiUrl = null;
+
     try {
         const page = await browser.newPage();
 
-        // Load login cookies
+        // Load cookies
         if (fs.existsSync(COOKIES_PATH)) {
             const cookies = JSON.parse(fs.readFileSync(COOKIES_PATH, 'utf8'));
             await page.setCookie(...cookies);
         }
 
-        console.log("🌐 Navigating to share link...");
-        await page.goto(share, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        // Intercept network requests to find the API call
+        page.on('response', async (response) => {
+            const reqUrl = response.url();
 
-        let capturedUrl = null;
-
-        // Listen for network requests and find the first .m3u8 URL
-        page.on('request', request => {
-            const url = request.url();
-            if (!capturedUrl && url.includes('.m3u8')) {
-                capturedUrl = url;
-                console.log("🎯 Captured M3U8 URL:", capturedUrl);
+            if (reqUrl.includes('/api/streaming') && !capturedApiUrl) {
+                try {
+                    const json = await response.json();
+                    if (json?.url?.includes('.m3u8')) {
+                        capturedApiUrl = json.url;
+                        console.log('🎯 M3U8 link captured:', capturedApiUrl);
+                    }
+                } catch (err) {
+                    console.warn(`⚠️ Couldn't parse JSON for ${reqUrl}`);
+                }
             }
         });
 
-        // Wait to give time for request to fire
+        // Go to the share link
+        console.log(`🌐 Visiting share page: ${share}`);
+        await page.goto(share, { waitUntil: 'networkidle2', timeout: 60000 });
+
+        // Wait 15 seconds to give time for the stream API to fire
         await new Promise(resolve => setTimeout(resolve, 15000));
 
-
-        if (!capturedUrl) {
+        if (!capturedApiUrl) {
             await browser.close();
-            return res.status(404).json({ success: false, message: "No M3U8 file found in network activity." });
+            return res.status(404).json({ success: false, message: "No streaming URL found in network." });
         }
 
-        // Open new tab to trigger download
-        const m3u8Page = await browser.newPage();
-        await m3u8Page.goto(capturedUrl, { waitUntil: 'networkidle2', timeout: 60000 });
+        // Open the captured M3U8 link in a new tab (to auto-download in browser)
+        const downloadPage = await browser.newPage();
+        await downloadPage.goto(capturedApiUrl, { waitUntil: 'networkidle2', timeout: 60000 });
 
-        // Save the M3U8 file content manually
-        const m3u8Data = await m3u8Page.evaluate(() => document.body.innerText);
-        const savePath = path.join(__dirname, `${Date.now()}-captured.m3u8`);
-        fs.writeFileSync(savePath, m3u8Data);
+        // Save the m3u8 file locally (optional)
+        const m3u8Content = await downloadPage.content();
+        const filename = `stream-${Date.now()}.m3u8`;
+        const filePath = path.join(__dirname, filename);
+        fs.writeFileSync(filePath, m3u8Content);
 
-        console.log(`✅ M3U8 saved: ${savePath}`);
         await browser.close();
+        return res.json({ success: true, path: filePath });
 
-        res.json({ success: true, path: savePath });
-
-    } catch (err) {
+    } catch (error) {
         await browser.close();
-        console.error("❌ Streaming error:", err);
-        res.status(500).json({ success: false, message: "Error while capturing M3U8 link." });
+        console.error("❌ Streaming error:", error);
+        res.status(500).json({ success: false, message: "Failed to extract streaming link." });
     }
 });
+
 
 
 
