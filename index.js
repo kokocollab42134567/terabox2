@@ -541,7 +541,8 @@ app.get('/stream', async (req, res) => {
         });
 
         // Wait to give time for request to fire
-        await page.waitForTimeout(15000);
+        await new Promise(resolve => setTimeout(resolve, 15000));
+
 
         if (!capturedUrl) {
             await browser.close();
