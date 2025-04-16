@@ -20,7 +20,7 @@ const UPDATE_INTERVAL = 3 * 24 * 60 * 60 * 1000; // 3 days in milliseconds
 // Function to log in and update cookies
 async function updateCookies() {
     const browser = await puppeteer.launch({
-        headless: 'new',  // Use 'new' for improved headless mode
+        headless: "new",  // Use 'new' for improved headless mode
         protocolTimeout: 180000, // Increased protocol timeout for stability
         executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined, // Use default if not set
         args: [
@@ -86,7 +86,7 @@ await fs.promises.writeFile(COOKIES_FILE, JSON.stringify(cookies, null, 2));
     console.log(`Cookies updated and saved to ${COOKIES_FILE}`);
     await browser.close();
 }
-const SELF_CHECK_URL = "https://terabox2-production.up.railway.app/hi";
+const SELF_CHECK_URL = "https://teraboxupload1-production.up.railway.app/hi";
 
 async function checkServerHealth() {
     try {
@@ -152,7 +152,7 @@ const upload = multer({
 async function uploadToTeraBox(filePath, fileName) {
     const MAX_RETRIES = 3;
     let attempt = 0;
-    let requestId = Date.now(); // Unique ID for tracking each file upload
+    let requestId = Date.now();
 
     while (attempt < MAX_RETRIES) {
         let browser;
@@ -161,19 +161,18 @@ async function uploadToTeraBox(filePath, fileName) {
         try {
             console.log(`🔄 Attempt ${attempt + 1}/${MAX_RETRIES} for file: ${fileName} (Request ID: ${requestId})`);
 
-            // Launch a new isolated browser instance
-            const browser = await puppeteer.launch({
-                headless: 'new',  // Use 'new' for improved headless mode
-                protocolTimeout: 180000, // Increased protocol timeout for stability
-                executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined, // Use default if not set
+            browser = await puppeteer.launch({
+                headless: "new",
+                protocolTimeout: 180000,
+                executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
                 args: [
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
                     '--disable-dev-shm-usage',
                     '--disable-gpu',
-                    '--disable-features=IsolateOrigins,site-per-process', // More stable site isolation
+                    '--disable-features=IsolateOrigins,site-per-process',
                     '--disable-web-security',
-                    '--disable-http2', // Disable HTTP/2 if causing issues
+                    '--disable-http2',
                     '--proxy-server="direct://"',
                     '--proxy-bypass-list=*',
                     '--disable-background-timer-throttling',
@@ -183,8 +182,8 @@ async function uploadToTeraBox(filePath, fileName) {
                     '--disable-ipc-flooding-protection',
                     '--enable-features=NetworkService,NetworkServiceInProcess',
                 ],
-                ignoreDefaultArgs: ['--disable-extensions'], // Allow extensions if needed
-                defaultViewport: null, // Avoid viewport resizing issues
+                ignoreDefaultArgs: ['--disable-extensions'],
+                defaultViewport: null,
             });
 
             uploadPage = await browser.newPage();
@@ -193,7 +192,6 @@ async function uploadToTeraBox(filePath, fileName) {
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
             );
 
-            // Load cookies if available
             if (fs.existsSync(COOKIES_PATH)) {
                 const cookies = JSON.parse(fs.readFileSync(COOKIES_PATH, 'utf8'));
                 await uploadPage.setCookie(...cookies);
@@ -201,153 +199,61 @@ async function uploadToTeraBox(filePath, fileName) {
 
             console.log("🌍 Navigating to TeraBox...");
             await uploadPage.goto('https://www.terabox.com/main?category=all', { waitUntil: 'load', timeout: 60000 });
-
             console.log("✅ Page loaded successfully.");
 
             const fileInputSelector = 'input#h5Input0';
             await uploadPage.waitForSelector(fileInputSelector, { visible: true, timeout: 20000 });
 
-// **Store the initial first row ID**
-            // **Store the initial first row ID**
-const firstRowSelector = 'tbody tr:first-child';
-let initialRowId = await uploadPage.evaluate((selector) => {
-    const row = document.querySelector(selector);
-    return row ? row.getAttribute('data-id') : null;
-}, firstRowSelector);
+            console.log(`📤 Uploading file: ${fileName} (Request ID: ${requestId})`);
 
-console.log("📌 Stored initial first row ID:", initialRowId);
-console.log(`📤 Uploading file: ${fileName} (Request ID: ${requestId})`);
+            const inputUploadHandle = await uploadPage.$(fileInputSelector);
+            await inputUploadHandle.uploadFile(filePath);
+            console.log(`📤 File selected for upload: ${filePath}`);
 
-const inputUploadHandle = await uploadPage.$(fileInputSelector);
-await inputUploadHandle.uploadFile(filePath);
-console.log(`📤 File selected for upload: ${filePath}`);
+            const successSelector = '.status-success.file-list';
+            const progressSelector = '.status-uploading.file-list .progress-now.progress-common';
 
-// **Wait for upload progress or success**
-console.log("⏳ Checking for upload status...");
+            await new Promise(async (resolve) => {
+                let lastProgress = "";
 
-const successSelector = '.status-success.file-list';
-const progressSelector = '.status-uploading.file-list .progress-now.progress-common';
+                const checkProgress = async () => {
+                    try {
+                        const progress = await uploadPage.evaluate((selector) => {
+                            const progressElement = document.querySelector(selector);
+                            return progressElement ? progressElement.style.width : null;
+                        }, progressSelector);
 
-try {
-    // Check if file is already marked as uploaded (fast uploads)
-    const isUploaded = await uploadPage.evaluate((selector) => {
-        return !!document.querySelector(selector);
-    }, successSelector);
+                        if (progress && progress !== lastProgress) {
+                            console.log(`📊 Upload Progress: ${progress}`);
+                            lastProgress = progress;
+                        }
 
-    if (isUploaded) {
-        console.log("✅ Upload completed instantly (Success detected).");
-    } else {
-        console.log("⏳ Upload in progress, tracking dynamically...");
+                        const isUploaded = await uploadPage.evaluate((selector) => {
+                            return !!document.querySelector(selector);
+                        }, successSelector);
 
-        // **Track Upload Progress Dynamically**
-        await new Promise(async (resolve) => {
-            let lastProgress = "";
-
-            const checkProgress = async () => {
-                try {
-                    const progress = await uploadPage.evaluate((selector) => {
-                        const progressElement = document.querySelector(selector);
-                        return progressElement ? progressElement.style.width : null;
-                    }, progressSelector);
-
-                    if (progress && progress !== lastProgress) {
-                        console.log(`📊 Upload Progress: ${progress}`);
-                        lastProgress = progress;
-                    }
-
-                    // **Check if upload finished successfully**
-                    const isUploaded = await uploadPage.evaluate((selector) => {
-                        return !!document.querySelector(selector);
-                    }, successSelector);
-
-                    if (isUploaded || progress === "100%") {
-                        console.log("✅ Upload completed!");
-                        resolve();
-                    } else {
+                        if (isUploaded || progress === "100%") {
+                            console.log("✅ Upload completed!");
+                            resolve();
+                        } else {
+                            setTimeout(checkProgress, 1000);
+                        }
+                    } catch (error) {
+                        console.log("⚠️ Error tracking progress, retrying...");
                         setTimeout(checkProgress, 1000);
                     }
-                } catch (error) {
-                    console.log("⚠️ Error tracking progress, but upload is still ongoing...");
-                    setTimeout(checkProgress, 1000);
-                }
-            };
+                };
 
-            checkProgress();
-        });
-    }
-} catch (error) {
-    console.log("⚠️ Upload tracking encountered an error:", error);
-}
-
-console.log("✅ Upload finished.");
-
-
-// **Wait for upload to complete by detecting new row ID**
-            console.log("⏳ Waiting for the upload to complete...");
-            await uploadPage.waitForFunction(
-                (selector, initialId) => {
-                    const row = document.querySelector(selector);
-                    return row && row.getAttribute('data-id') !== initialId;
-                },
-                { timeout: 600000 }, // Wait up to 10 minutes
-                firstRowSelector,
-                initialRowId
-            );
-
-            console.log("✅ Upload finished, new file detected.");
-
-// **Store the ID of the new uploaded file's row**
-            let uploadedRowId = await uploadPage.evaluate((selector) => {
-                const row = document.querySelector(selector);
-                return row ? row.getAttribute('data-id') : null;
-            }, firstRowSelector);
-
-            console.log("📌 Stored uploaded row ID:", uploadedRowId);
-
-// **Select the first row and its checkbox**
-            await uploadPage.waitForSelector(firstRowSelector, { visible: true });
-            await uploadPage.click(firstRowSelector);
-            console.log("✅ Selected first row");
-
-            const checkboxSelector = 'tbody tr:first-child .wp-s-pan-table__body-row--checkbox-block.is-select';
-            await uploadPage.waitForSelector(checkboxSelector, { visible: true });
-            await uploadPage.click(checkboxSelector);
-            console.log("✅ Selected checkbox");
-
-
-            // **Share file and get the link**
-            console.log("🔗 Generating share link...");
-            const shareButtonSelector = '[title="Share"]';
-            await uploadPage.waitForSelector(shareButtonSelector, { visible: true });
-            await uploadPage.click(shareButtonSelector);
-
-            const copyButtonSelector = '.private-share-btn';
-            await uploadPage.waitForSelector(copyButtonSelector, { visible: true });
-            await uploadPage.click(copyButtonSelector);
-
-            const linkSelector = '.copy-link-content p.text';
-            await uploadPage.waitForSelector(linkSelector, { visible: true });
-            const shareLink = await uploadPage.$eval(linkSelector, el => el.textContent.trim());
-
-            console.log(`✅ Share Link: ${shareLink}`);
-
-            // 🆕 **Step: Click on the row that matches the stored uploaded row ID**
-            if (uploadedRowId) {
-                const uploadedCheckboxSelector = `tbody tr[data-id="${uploadedRowId}"] .wp-s-pan-table__body-row--checkbox-block.is-select`;
-                await uploadPage.waitForSelector(uploadedCheckboxSelector, { visible: true });
-                await uploadPage.click(uploadedCheckboxSelector);
-                console.log(`✅ Clicked on the uploaded row (ID: ${uploadedRowId})`);
-            } else {
-                console.log("⚠️ Could not find uploaded row ID. Skipping row click.");
-            }
+                checkProgress();
+            });
 
             await uploadPage.close();
             await browser.close();
             console.log("❎ Closed the browser.");
-            fs.unlinkSync(filePath); 
+            fs.unlinkSync(filePath);
             console.log(`🗑️ Deleted temporary file: ${filePath}`);
 
-            return { success: true, link: shareLink };
+            return { success: true, filename: fileName };
         } catch (error) {
             console.error(`❌ Upload error on attempt ${attempt + 1}:`, error);
             attempt++;
@@ -360,6 +266,7 @@ console.log("✅ Upload finished.");
     return { success: false, error: "Upload failed after multiple attempts." };
 }
 
+
 app.post('/upload', (req, res) => {
     let receivedBytes = 0;
     let loggedMB = 0;
@@ -368,8 +275,6 @@ app.post('/upload', (req, res) => {
 if (!originalFilename) {
     return res.status(400).json({ success: false, message: "Filename is required in headers." });
 }
-
-
 
 const filePath = path.join(uploadDir, originalFilename); // Use filename as is
 
@@ -415,7 +320,7 @@ const filePath = path.join(uploadDir, originalFilename); // Use filename as is
         res.status(500).json({ success: false, message: "Upload interrupted." });
     });
 });
-app.get('/download1', async (req, res) => {
+app.get('/download', async (req, res) => {
     const { filename } = req.query;
     if (!filename) {
         return res.status(400).json({ success: false, message: "Filename is required." });
@@ -502,85 +407,6 @@ app.get('/download1', async (req, res) => {
         res.status(500).json({ success: false, message: "Failed to retrieve download link." });
     }
 });
-
-const DOWNLOADS_DIR = path.join(__dirname, 'downloads');
-if (!fs.existsSync(DOWNLOADS_DIR)) fs.mkdirSync(DOWNLOADS_DIR);
-
-app.get('/stream', async (req, res) => {
-    const { share } = req.query;
-    if (!share) {
-        return res.status(400).json({ success: false, message: "Missing 'share' query parameter." });
-    }
-
-    const browser = await puppeteer.launch({
-        headless: 'new',
-        args: ['--no-sandbox', '--disable-setuid-sandbox']
-    });
-
-    let capturedApiUrl = null;
-
-    try {
-        const page = await browser.newPage();
-
-        // Load cookies
-        if (fs.existsSync(COOKIES_PATH)) {
-            const cookies = JSON.parse(fs.readFileSync(COOKIES_PATH, 'utf8'));
-            await page.setCookie(...cookies);
-        }
-
-        // Intercept network requests to find the API call
-        page.on('response', async (response) => {
-            const reqUrl = response.url();
-
-            if (reqUrl.includes('/api/streaming') && !capturedApiUrl) {
-                try {
-                    const json = await response.json();
-                    if (json?.url?.includes('.m3u8')) {
-                        capturedApiUrl = json.url;
-                        console.log('🎯 M3U8 link captured:', capturedApiUrl);
-                    }
-                } catch (err) {
-                    console.warn(`⚠️ Couldn't parse JSON for ${reqUrl}`);
-                }
-            }
-        });
-
-        // Go to the share link
-        console.log(`🌐 Visiting share page: ${share}`);
-        await page.goto(share, { waitUntil: 'networkidle2', timeout: 60000 });
-
-        // Wait 15 seconds to give time for the stream API to fire
-        await new Promise(resolve => setTimeout(resolve, 15000));
-
-        if (!capturedApiUrl) {
-            await browser.close();
-            return res.status(404).json({ success: false, message: "No streaming URL found in network." });
-        }
-
-        // Open the captured M3U8 link in a new tab (to auto-download in browser)
-        const downloadPage = await browser.newPage();
-        await downloadPage.goto(capturedApiUrl, { waitUntil: 'networkidle2', timeout: 60000 });
-
-        // Save the m3u8 file locally (optional)
-        const m3u8Content = await downloadPage.content();
-        const filename = `stream-${Date.now()}.m3u8`;
-        const filePath = path.join(__dirname, filename);
-        fs.writeFileSync(filePath, m3u8Content);
-
-        await browser.close();
-        return res.json({ success: true, path: filePath });
-
-    } catch (error) {
-        await browser.close();
-        console.error("❌ Streaming error:", error);
-        res.status(500).json({ success: false, message: "Failed to extract streaming link." });
-    }
-});
-
-
-
-
-
 
 
 const server = app.listen(port, () => {
