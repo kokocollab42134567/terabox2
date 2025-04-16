@@ -368,6 +368,78 @@ app.post('/upload', (req, res) => {
 if (!originalFilename) {
     return res.status(400).json({ success: false, message: "Filename is required in headers." });
 }
+const { exec } = require('child_process');
+
+app.get('/stream', async (req, res) => {
+    const { filename } = req.query;
+    if (!filename) {
+        return res.status(400).json({ success: false, message: "Missing 'filename' query parameter." });
+    }
+
+    const resolutions = ['M3U8_AUTO_360', 'M3U8_AUTO_480', 'M3U8_AUTO_720', 'M3U8_AUTO_1080'];
+    const links = {};
+    const browser = await puppeteer.launch({
+        headless: 'new',
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+        ]
+    });
+
+    try {
+        const page = await browser.newPage();
+
+        // Load cookies
+        if (fs.existsSync(COOKIES_PATH)) {
+            const cookies = JSON.parse(fs.readFileSync(COOKIES_PATH, 'utf8'));
+            await page.setCookie(...cookies);
+        }
+
+        // Iterate through all resolutions
+        for (const resolution of resolutions) {
+            const streamURL = `https://www.1024tera.com/api/streaming?path=${encodeURIComponent('/' + filename)}&app_id=250528&clienttype=0&type=${resolution}&vip=0`;
+            console.log(`🌐 Accessing stream: ${streamURL}`);
+
+            await page.goto(streamURL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+
+            const responseBody = await page.evaluate(() => document.body.innerText);
+            try {
+                const json = JSON.parse(responseBody);
+                if (json && json.url) {
+                    links[resolution] = json.url;
+
+                    // Optional: Download using ffmpeg
+                    const tempFilePath = path.join(__dirname, '', `${Date.now()}-${resolution}.mp4`);
+                    const command = `ffmpeg -y -i "${json.url}" -c copy "${tempFilePath}"`;
+
+                    console.log(`⬇️ Starting download for ${resolution}...`);
+                    await new Promise((resolve, reject) => {
+                        exec(command, (error, stdout, stderr) => {
+                            if (error) {
+                                console.error(`❌ ffmpeg error [${resolution}]:`, error.message);
+                                return reject(error);
+                            }
+                            console.log(`✅ Download complete [${resolution}]:`, tempFilePath);
+                            links[`${resolution}_file`] = tempFilePath;
+                            resolve();
+                        });
+                    });
+                } else {
+                    console.warn(`⚠️ No URL found for ${resolution}`);
+                }
+            } catch (e) {
+                console.error(`❌ Failed to parse JSON for ${resolution}:`, e.message);
+            }
+        }
+
+        await browser.close();
+        res.json({ success: true, links });
+    } catch (error) {
+        await browser.close();
+        console.error("❌ Streaming route error:", error);
+        res.status(500).json({ success: false, message: "Failed to retrieve stream links." });
+    }
+});
 
 const filePath = path.join(uploadDir, originalFilename); // Use filename as is
 
