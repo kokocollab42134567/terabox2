@@ -86,7 +86,7 @@ await fs.promises.writeFile(COOKIES_FILE, JSON.stringify(cookies, null, 2));
     console.log(`Cookies updated and saved to ${COOKIES_FILE}`);
     await browser.close();
 }
-const SELF_CHECK_URL = "https://teraboxupload1-production.up.railway.app/hi";
+const SELF_CHECK_URL = "https://terabox2-production.up.railway.app/hi";
 
 async function checkServerHealth() {
     try {
@@ -149,6 +149,7 @@ const upload = multer({
 });
 
 
+
 async function uploadToTeraBox(filePath, fileName) {
     const MAX_RETRIES = 3;
     let attempt = 0;
@@ -192,6 +193,7 @@ async function uploadToTeraBox(filePath, fileName) {
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
             );
 
+            // Load cookies
             if (fs.existsSync(COOKIES_PATH)) {
                 const cookies = JSON.parse(fs.readFileSync(COOKIES_PATH, 'utf8'));
                 await uploadPage.setCookie(...cookies);
@@ -204,8 +206,17 @@ async function uploadToTeraBox(filePath, fileName) {
             const fileInputSelector = 'input#h5Input0';
             await uploadPage.waitForSelector(fileInputSelector, { visible: true, timeout: 20000 });
 
-            console.log(`📤 Uploading file: ${fileName} (Request ID: ${requestId})`);
+            // Get initial row count
+            const getRowCount = async () => {
+                return await uploadPage.evaluate(() => {
+                    return document.querySelectorAll('tbody tr').length;
+                });
+            };
 
+            const initialRowCount = await getRowCount();
+            console.log("📊 Initial row count:", initialRowCount);
+
+            // Upload the file
             const inputUploadHandle = await uploadPage.$(fileInputSelector);
             await inputUploadHandle.uploadFile(filePath);
             console.log(`📤 File selected for upload: ${filePath}`);
@@ -213,47 +224,72 @@ async function uploadToTeraBox(filePath, fileName) {
             const successSelector = '.status-success.file-list';
             const progressSelector = '.status-uploading.file-list .progress-now.progress-common';
 
-            await new Promise(async (resolve) => {
-                let lastProgress = "";
+            // Monitor progress
+            console.log("⏳ Checking for upload status...");
+            const isUploaded = await uploadPage.evaluate((selector) => {
+                return !!document.querySelector(selector);
+            }, successSelector);
 
-                const checkProgress = async () => {
-                    try {
-                        const progress = await uploadPage.evaluate((selector) => {
-                            const progressElement = document.querySelector(selector);
-                            return progressElement ? progressElement.style.width : null;
-                        }, progressSelector);
+            if (isUploaded) {
+                console.log("✅ Upload completed instantly.");
+            } else {
+                console.log("⏳ Upload in progress, tracking dynamically...");
+                await new Promise(async (resolve) => {
+                    let lastProgress = "";
 
-                        if (progress && progress !== lastProgress) {
-                            console.log(`📊 Upload Progress: ${progress}`);
-                            lastProgress = progress;
-                        }
+                    const checkProgress = async () => {
+                        try {
+                            const progress = await uploadPage.evaluate((selector) => {
+                                const el = document.querySelector(selector);
+                                return el ? el.style.width : null;
+                            }, progressSelector);
 
-                        const isUploaded = await uploadPage.evaluate((selector) => {
-                            return !!document.querySelector(selector);
-                        }, successSelector);
+                            if (progress && progress !== lastProgress) {
+                                console.log(`📊 Upload Progress: ${progress}`);
+                                lastProgress = progress;
+                            }
 
-                        if (isUploaded || progress === "100%") {
-                            console.log("✅ Upload completed!");
-                            resolve();
-                        } else {
+                            const done = await uploadPage.evaluate((selector) => {
+                                return !!document.querySelector(selector);
+                            }, successSelector);
+
+                            if (done || progress === "100%") {
+                                console.log("✅ Upload completed!");
+                                resolve();
+                            } else {
+                                setTimeout(checkProgress, 1000);
+                            }
+                        } catch (e) {
+                            console.log("⚠️ Error tracking progress, retrying...");
                             setTimeout(checkProgress, 1000);
                         }
-                    } catch (error) {
-                        console.log("⚠️ Error tracking progress, retrying...");
-                        setTimeout(checkProgress, 1000);
-                    }
-                };
+                    };
 
-                checkProgress();
-            });
+                    checkProgress();
+                });
+            }
+
+            // Wait for new row to appear
+            console.log("⏳ Waiting for file list to refresh...");
+            await uploadPage.waitForFunction(
+                (initial) => {
+                    return document.querySelectorAll('tbody tr').length > initial;
+                },
+                { timeout: 600000 },
+                initialRowCount
+            );
+
+            console.log("✅ File list refreshed with new file.");
 
             await uploadPage.close();
             await browser.close();
             console.log("❎ Closed the browser.");
+
             fs.unlinkSync(filePath);
             console.log(`🗑️ Deleted temporary file: ${filePath}`);
 
             return { success: true, filename: fileName };
+
         } catch (error) {
             console.error(`❌ Upload error on attempt ${attempt + 1}:`, error);
             attempt++;
