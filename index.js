@@ -159,111 +159,131 @@ async function uploadToTeraBox(filePath, fileName) {
         let browser;
         let uploadPage;
 
+        console.log(`🔄 Attempt ${attempt + 1}/${MAX_RETRIES} for file: ${fileName} (Request ID: ${requestId})`);
+
         try {
-            console.log(`🔄 Attempt ${attempt + 1}/${MAX_RETRIES} for file: ${fileName} (Request ID: ${requestId})`);
+            // Step 1: Launch browser
+            try {
+                browser = await puppeteer.launch({
+                    headless: 'new',
+                    protocolTimeout: 180000,
+                    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+                    args: [
+                        '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
+                        '--disable-gpu', '--disable-features=IsolateOrigins,site-per-process',
+                        '--disable-web-security', '--disable-http2',
+                        '--proxy-server="direct://"', '--proxy-bypass-list=*',
+                        '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows',
+                        '--disable-renderer-backgrounding', '--disable-accelerated-2d-canvas',
+                        '--disable-ipc-flooding-protection',
+                        '--enable-features=NetworkService,NetworkServiceInProcess',
+                    ],
+                    ignoreDefaultArgs: ['--disable-extensions'],
+                    defaultViewport: null,
+                });
 
-            browser = await puppeteer.launch({
-                headless: 'new',
-                protocolTimeout: 180000,
-                executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
-                args: [
-                    '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
-                    '--disable-gpu', '--disable-features=IsolateOrigins,site-per-process',
-                    '--disable-web-security', '--disable-http2',
-                    '--proxy-server="direct://"', '--proxy-bypass-list=*',
-                    '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows',
-                    '--disable-renderer-backgrounding', '--disable-accelerated-2d-canvas',
-                    '--disable-ipc-flooding-protection',
-                    '--enable-features=NetworkService,NetworkServiceInProcess',
-                ],
-                ignoreDefaultArgs: ['--disable-extensions'],
-                defaultViewport: null,
-            });
+                uploadPage = await browser.newPage();
+                await uploadPage.setViewport({ width: 1280, height: 800 });
+                await uploadPage.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64)...");
 
-            uploadPage = await browser.newPage();
-            await uploadPage.setViewport({ width: 1280, height: 800 });
-            await uploadPage.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64)...");
-
-            if (fs.existsSync(COOKIES_PATH)) {
-                const cookies = JSON.parse(fs.readFileSync(COOKIES_PATH, 'utf8'));
-                await uploadPage.setCookie(...cookies);
+                if (fs.existsSync(COOKIES_PATH)) {
+                    const cookies = JSON.parse(fs.readFileSync(COOKIES_PATH, 'utf8'));
+                    await uploadPage.setCookie(...cookies);
+                }
+            } catch (launchErr) {
+                console.error("🚫 Failed during browser launch or setup:", launchErr);
+                throw launchErr;
             }
 
-            console.log("🌍 Navigating to TeraBox...");
-            await uploadPage.goto('https://www.terabox.com/main?category=all', { waitUntil: 'load', timeout: 60000 });
+            // Step 2: Navigate to TeraBox
+            try {
+                console.log("🌍 Navigating to TeraBox...");
+                await uploadPage.goto('https://www.terabox.com/main?category=all', { waitUntil: 'load', timeout: 60000 });
+            } catch (navErr) {
+                console.error("🚫 Failed during navigation:", navErr);
+                throw navErr;
+            }
 
-            const fileInputSelector = 'input#h5Input0';
-            const firstRowSelector = 'tbody tr:first-child';
-            await uploadPage.waitForSelector(fileInputSelector, { visible: true, timeout: 20000 });
+            // Step 3: Upload file
+            let initialRowId;
+            try {
+                const fileInputSelector = 'input#h5Input0';
+                const firstRowSelector = 'tbody tr:first-child';
 
-            let initialRowId = await uploadPage.evaluate((selector) => {
-                const row = document.querySelector(selector);
-                return row ? row.getAttribute('data-id') : null;
-            }, firstRowSelector);
+                await uploadPage.waitForSelector(fileInputSelector, { visible: true, timeout: 20000 });
 
-            console.log(`📤 Uploading file: ${fileName}`);
-            const inputUploadHandle = await uploadPage.$(fileInputSelector);
-            await inputUploadHandle.uploadFile(filePath);
+                initialRowId = await uploadPage.evaluate((selector) => {
+                    const row = document.querySelector(selector);
+                    return row ? row.getAttribute('data-id') : null;
+                }, firstRowSelector);
 
-            // Track upload progress
-            const successSelector = '.status-success.file-list';
-            const progressSelector = '.status-uploading.file-list .progress-now.progress-common';
+                console.log(`📤 Uploading file: ${fileName}`);
+                const inputUploadHandle = await uploadPage.$(fileInputSelector);
+                await inputUploadHandle.uploadFile(filePath);
 
-            await new Promise(async (resolve) => {
-                let lastProgress = "";
-                const checkProgress = async () => {
-                    try {
-                        const progress = await uploadPage.evaluate((selector) => {
-                            const el = document.querySelector(selector);
-                            return el ? el.style.width : null;
-                        }, progressSelector);
+                const successSelector = '.status-success.file-list';
+                const progressSelector = '.status-uploading.file-list .progress-now.progress-common';
 
-                        if (progress && progress !== lastProgress) {
-                            console.log(`📊 Upload Progress: ${progress}`);
-                            lastProgress = progress;
-                        }
+                await new Promise(async (resolve) => {
+                    let lastProgress = "";
+                    const checkProgress = async () => {
+                        try {
+                            const progress = await uploadPage.evaluate((selector) => {
+                                const el = document.querySelector(selector);
+                                return el ? el.style.width : null;
+                            }, progressSelector);
 
-                        const isUploaded = await uploadPage.evaluate((selector) => {
-                            return !!document.querySelector(selector);
-                        }, successSelector);
+                            if (progress && progress !== lastProgress) {
+                                console.log(`📊 Upload Progress: ${progress}`);
+                                lastProgress = progress;
+                            }
 
-                        if (isUploaded || progress === "100%") {
-                            console.log("✅ Upload completed!");
-                            resolve();
-                        } else {
+                            const isUploaded = await uploadPage.evaluate((selector) => {
+                                return !!document.querySelector(selector);
+                            }, successSelector);
+
+                            if (isUploaded || progress === "100%") {
+                                console.log("✅ Upload completed!");
+                                resolve();
+                            } else {
+                                setTimeout(checkProgress, 1000);
+                            }
+                        } catch {
                             setTimeout(checkProgress, 1000);
                         }
-                    } catch {
-                        setTimeout(checkProgress, 1000);
-                    }
-                };
-                checkProgress();
-            });
+                    };
+                    checkProgress();
+                });
 
-            // Wait for row to update
-            console.log("⏳ Waiting for file list update...");
-            await uploadPage.waitForFunction(
-                (selector, oldId) => {
-                    const row = document.querySelector(selector);
-                    return row && row.getAttribute('data-id') !== oldId;
-                },
-                { timeout: 600000 },
-                firstRowSelector,
-                initialRowId
-            );
+                console.log("⏳ Waiting for file list update...");
+                await uploadPage.waitForFunction(
+                    (selector, oldId) => {
+                        const row = document.querySelector(selector);
+                        return row && row.getAttribute('data-id') !== oldId;
+                    },
+                    { timeout: 600000 },
+                    firstRowSelector,
+                    initialRowId
+                );
+            } catch (uploadErr) {
+                console.error("🚫 Failed during file upload:", uploadErr);
+                throw uploadErr;
+            }
 
-            let uploadedRowId = await uploadPage.evaluate((selector) => {
-                const row = document.querySelector(selector);
-                return row ? row.getAttribute('data-id') : null;
-            }, firstRowSelector);
-
-            console.log("🔄 Reloading file list...");
-            await uploadPage.reload({ waitUntil: 'domcontentloaded' });
-            await uploadPage.waitForSelector(firstRowSelector, { visible: true });
-
-            // Try to generate share link once
+            // Step 4: Generate share link
             let shareLink = null;
             try {
+                console.log("🔄 Reloading file list...");
+                await uploadPage.reload({ waitUntil: 'domcontentloaded' });
+
+                const firstRowSelector = 'tbody tr:first-child';
+                await uploadPage.waitForSelector(firstRowSelector, { visible: true });
+
+                let uploadedRowId = await uploadPage.evaluate((selector) => {
+                    const row = document.querySelector(selector);
+                    return row ? row.getAttribute('data-id') : null;
+                }, firstRowSelector);
+
                 console.log("🔗 Attempting to generate share link...");
                 const checkboxSelector = `tbody tr[data-id="${uploadedRowId}"] .wp-s-pan-table__body-row--checkbox-block.is-select`;
                 await uploadPage.waitForSelector(checkboxSelector, { visible: true, timeout: 10000 });
@@ -282,11 +302,11 @@ async function uploadToTeraBox(filePath, fileName) {
                 shareLink = await uploadPage.$eval(linkSelector, el => el.textContent.trim());
 
                 console.log(`✅ Share Link: ${shareLink}`);
-            } catch (err) {
-                console.log("⚠️ Failed to generate share link. Skipping...");
-                console.log(`📄 Uploaded file name: ${fileName}`);
+            } catch (shareErr) {
+                console.warn("⚠️ Failed to generate share link. Continuing without it.");
             }
 
+            // Cleanup
             await uploadPage.close();
             await browser.close();
             fs.unlinkSync(filePath);
@@ -296,17 +316,22 @@ async function uploadToTeraBox(filePath, fileName) {
                 ? { success: true, link: shareLink }
                 : { success: true, file: fileName };
 
-        } catch (error) {
-            console.error(`❌ Upload error on attempt ${attempt + 1}:`, error);
+        } catch (mainErr) {
+            console.error(`❌ Error on attempt ${attempt + 1}:`, mainErr);
             attempt++;
 
-            if (uploadPage) await uploadPage.close();
-            if (browser) await browser.close();
+            try {
+                if (uploadPage) await uploadPage.close();
+                if (browser) await browser.close();
+            } catch (cleanupErr) {
+                console.error("⚠️ Error during cleanup:", cleanupErr);
+            }
         }
     }
 
     return { success: false, error: "Upload failed after multiple attempts." };
 }
+
 
 app.post('/upload', (req, res) => {
     let receivedBytes = 0;
